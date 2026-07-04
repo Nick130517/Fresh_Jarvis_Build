@@ -5,23 +5,38 @@ Input:  transcribe() sends a voice message's audio to Groq's Whisper API
         (part of the same free tier as the chat models — no extra cost,
         no separate signup).
 
-Output: synthesize() turns a text reply into an actual spoken Telegram
-        voice note. gTTS (free, no API key) generates the speech as mp3;
-        ffmpeg then converts it to OGG/Opus, because that's the specific
-        format Telegram requires for a message to render as a proper
-        voice-note bubble rather than a generic audio file attachment.
+Output: synthesize() uses Piper — a fully local, CPU-only neural TTS
+        engine — to generate speech, then ffmpeg converts it to OGG/Opus,
+        the specific format Telegram requires for a message to render as
+        a proper voice-note bubble rather than a generic audio file.
+
+        Piper replaced an earlier gTTS-based version: gTTS needs a network
+        round trip to Google for every single reply (measured at ~2.6s of
+        a ~5.5s total response time), which is the dominant cost in the
+        whole pipeline. Piper runs the model directly on the server's CPU
+        with no network call at all, and is designed to be real-time even
+        on modest hardware (it runs live on a Raspberry Pi 5) — so this
+        should cut voice-reply latency roughly in half.
 """
 
 import os
+import time
+import wave
 import subprocess
 import tempfile
 import logging
-from gtts import gTTS
 from groq import Groq
+from piper import PiperVoice
 
 log = logging.getLogger("jarvis.voice")
 
 _groq_client = None
+_piper_voice = None
+
+PIPER_MODEL_DIR = os.environ.get(
+    "PIPER_MODEL_DIR", os.path.join(os.path.dirname(__file__), "piper_voices")
+)
+PIPER_VOICE_NAME = os.environ.get("PIPER_VOICE_NAME", "en_GB-alan-medium")
 
 
 def _groq():
@@ -29,6 +44,26 @@ def _groq():
     if _groq_client is None:
         _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
     return _groq_client
+
+
+def _piper() -> PiperVoice:
+    """
+    Lazily loads the Piper voice model once and reuses it for every reply
+    (loading the ONNX model has real overhead — you don't want to pay that
+    cost on every single message). If the voice files aren't downloaded
+    yet, this raises a clear error telling you exactly what to run.
+    """
+    global _piper_voice
+    if _piper_voice is None:
+        model_path = os.path.join(PIPER_MODEL_DIR, f"{PIPER_VOICE_NAME}.onnx")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Piper voice model not found at {model_path}. Run:\n"
+                f"  python3 -m piper.download_voices {PIPER_VOICE_NAME} "
+                f"--download-dir {PIPER_MODEL_DIR}"
+            )
+        _piper_voice = PiperVoice.load(model_path)
+    return _piper_voice
 
 
 def transcribe(audio_path: str) -> str:
@@ -40,7 +75,6 @@ def transcribe(audio_path: str) -> str:
             file=(os.path.basename(audio_path), f.read()),
             response_format="text",
         )
-    # response_format="text" returns the transcript directly as a string
     return str(result).strip()
 
 
@@ -57,16 +91,19 @@ def synthesize(text: str, max_chars: int = 500) -> str | None:
         text = text[:max_chars].rsplit(".", 1)[0] + "."
 
     try:
+        voice = _piper()
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            mp3_path = os.path.join(tmpdir, "reply.mp3")
+            wav_path = os.path.join(tmpdir, "reply.wav")
             ogg_path = os.path.join(tmpdir, "reply.ogg")
 
-            gTTS(text=text, lang="en", tld="co.uk").save(mp3_path)
+            with wave.open(wav_path, "wb") as wav_file:
+                voice.synthesize_wav(text, wav_file)
 
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
-                    "-i", mp3_path,
+                    "-i", wav_path,
                     "-c:a", "libopus", "-b:a", "32k", "-ar", "48000", "-ac", "1",
                     ogg_path,
                 ],
@@ -74,7 +111,6 @@ def synthesize(text: str, max_chars: int = 500) -> str | None:
                 timeout=30,
             )
 
-            # Move out of the temp dir before it gets cleaned up
             final_path = tempfile.mktemp(suffix=".ogg")
             os.rename(ogg_path, final_path)
             return final_path
