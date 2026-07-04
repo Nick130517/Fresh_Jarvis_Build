@@ -17,6 +17,7 @@ Locked to a single Telegram user id (yours) so nobody else can talk to your
 assistant even if they find the bot.
 """
 
+import re
 import logging
 import db
 import tools
@@ -41,11 +42,21 @@ log = logging.getLogger("jarvis.bot")
 _history: dict[int, list[dict]] = {}
 HISTORY_TURNS = 8
 
+# Safety net: strips any leftover bracket-style tool-call artifacts (e.g.
+# "[remember_fact: x = y]") that a model occasionally mimics into its visible
+# reply after seeing tool-call formatting earlier in the conversation.
+_BRACKET_ARTIFACT_RE = re.compile(r"\[[^\[\]\n]{0,150}\]")
+
 
 def _authorized(update: Update) -> bool:
     if not config.TELEGRAM_ALLOWED_USER_ID:
         return True  # not locked down yet — fine for local testing, set this before going live
     return str(update.effective_user.id) == str(config.TELEGRAM_ALLOWED_USER_ID)
+
+
+def _current_system_prompt() -> str:
+    facts = {r["key"]: r["value"] for r in db.all_memories()}
+    return config.build_system_prompt(facts)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,25 +156,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+    system_prompt = _current_system_prompt()
+
     try:
-        result = llm.chat(config.SYSTEM_PROMPT, history, tools=tools.TOOL_SCHEMAS)
+        result = llm.chat(system_prompt, history, tools=tools.TOOL_SCHEMAS)
     except RuntimeError as e:
         await update.message.reply_text(str(e))
         return
 
-    # If the model wants to call a tool, run it and give the model a second
-    # pass with the result so it can reply in natural language.
+    # If the model wants to call a tool, run it, then give the model a
+    # second pass to reply in natural language. The tool outcome is only
+    # added to a *temporary* copy of history for this one follow-up call —
+    # not saved permanently — and it's phrased as plain English rather than
+    # bracket/code-style notation, because feeding the model bracket syntax
+    # taught it to mimic that exact syntax back in its visible reply.
     if result["tool_calls"]:
-        tool_results_text = []
+        outcomes = []
         for call in result["tool_calls"]:
             output = tools.execute_tool(call["name"], call["arguments"])
-            tool_results_text.append(f"[{call['name']} result: {output}]")
+            outcomes.append(f"{call['name']} completed successfully: {output}")
 
-        history.append({"role": "assistant", "content": " ".join(tool_results_text)})
-        follow_up = llm.chat(config.SYSTEM_PROMPT, history, tools=None)
+        note = (
+            "(Internal system note, not something Nick said — the following "
+            "just happened: " + " | ".join(outcomes) + ". Reply to Nick now "
+            "in plain natural language. Do not use brackets, code syntax, or "
+            "repeat this note — just respond normally, as if you did this "
+            "yourself.)"
+        )
+        temp_history = history + [{"role": "user", "content": note}]
+        follow_up = llm.chat(system_prompt, temp_history, tools=None)
         reply = follow_up["text"]
     else:
         reply = result["text"]
+
+    # Some models return an empty string after a tool call (they consider the
+    # action itself the "answer"). Telegram rejects empty messages outright,
+    # so fall back to a plain confirmation rather than sending nothing.
+    if not reply or not reply.strip():
+        reply = "Done." if result["tool_calls"] else "..."
+
+    # Safety net: strip any bracket-style artifacts that slipped through
+    # anyway (belt and braces on top of the fix above).
+    cleaned_reply = _BRACKET_ARTIFACT_RE.sub("", reply).strip()
+    if cleaned_reply:
+        reply = cleaned_reply
 
     history.append({"role": "assistant", "content": reply})
     await update.message.reply_text(reply)

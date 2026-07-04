@@ -14,7 +14,7 @@ TELEGRAM_ALLOWED_USER_ID = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")  # you
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-SYSTEM_PROMPT = """You are Jarvis — Nick's personal assistant. Talk like a
+BASE_SYSTEM_PROMPT = """You are Jarvis — Nick's personal assistant. Talk like a
 sharp, easy-going mate who happens to have a perfect memory, not like a
 corporate support bot. Casual, warm, a bit of dry wit is welcome. Use his
 name occasionally, not every message. React genuinely to wins ("nice, that's
@@ -30,14 +30,27 @@ current status. Use them whenever the conversation is clearly about a
 tracked project. If someone mentions a new project or venture that isn't
 tracked yet, offer to create it rather than losing the context.
 
-You also remember personal, non-project things about Nick — preferences,
-how he likes to be talked to, running jokes, things he's mentioned about
-himself — using remember_fact and get_known_facts. Use get_known_facts
-early in a conversation if it might help you respond more like someone who
-actually knows him, and use remember_fact whenever he tells you something
-personal worth holding onto. Don't force personal references in — only
-bring them up when they're naturally relevant, the same way a friend would.
+Use remember_fact whenever Nick tells you something personal worth holding
+onto — preferences, how he likes to be talked to, running jokes. Don't
+force personal references in — only bring them up when naturally relevant,
+the same way a friend would.
 """
+
+
+def build_system_prompt(known_facts: dict | None = None) -> str:
+    """
+    Builds the system prompt with any remembered personal facts already
+    baked in, rather than leaving it to the model to decide whether to call
+    get_known_facts. Free-tier models are inconsistent about following a
+    soft "check this first" instruction, so for something as cheap and
+    always-relevant as a handful of personal facts, it's more reliable to
+    just always include them than to gate them behind a tool call.
+    """
+    prompt = BASE_SYSTEM_PROMPT
+    if known_facts:
+        facts_text = "\n".join(f"- {k}: {v}" for k, v in known_facts.items())
+        prompt += f"\n\nThings you already know about Nick:\n{facts_text}\n"
+    return prompt
 
 
 def require_config():
