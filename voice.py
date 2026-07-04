@@ -27,6 +27,7 @@ import tempfile
 import logging
 from groq import Groq
 from piper import PiperVoice
+from piper.config import SynthesisConfig
 
 log = logging.getLogger("jarvis.voice")
 
@@ -36,7 +37,15 @@ _piper_voice = None
 PIPER_MODEL_DIR = os.environ.get(
     "PIPER_MODEL_DIR", os.path.join(os.path.dirname(__file__), "piper_voices")
 )
-PIPER_VOICE_NAME = os.environ.get("PIPER_VOICE_NAME", "en_GB-alan-medium")
+# Swapped from en_GB-alan-medium, which came across as flat/sluggish —
+# northern_english_male has a warmer, livelier delivery while staying British.
+PIPER_VOICE_NAME = os.environ.get("PIPER_VOICE_NAME", "en_GB-northern_english_male-medium")
+
+# length_scale controls speaking pace in Piper/VITS: 1.0 is the model's
+# trained default, lower values speak faster (0.85 ≈ ~15% quicker), higher
+# values slower. This is independent of which voice model is loaded — it's
+# a dial on delivery speed, not a different voice.
+PIPER_LENGTH_SCALE = float(os.environ.get("PIPER_LENGTH_SCALE", "0.88"))
 
 
 def _groq():
@@ -91,14 +100,18 @@ def synthesize(text: str, max_chars: int = 500) -> str | None:
         text = text[:max_chars].rsplit(".", 1)[0] + "."
 
     try:
+        t0 = time.perf_counter()
         voice = _piper()
+        t_loaded = time.perf_counter()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             wav_path = os.path.join(tmpdir, "reply.wav")
             ogg_path = os.path.join(tmpdir, "reply.ogg")
 
             with wave.open(wav_path, "wb") as wav_file:
-                voice.synthesize_wav(text, wav_file)
+                syn_config = SynthesisConfig(length_scale=PIPER_LENGTH_SCALE)
+                voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+            t_synthesized = time.perf_counter()
 
             subprocess.run(
                 [
@@ -110,9 +123,17 @@ def synthesize(text: str, max_chars: int = 500) -> str | None:
                 check=True,
                 timeout=30,
             )
+            t_converted = time.perf_counter()
 
             final_path = tempfile.mktemp(suffix=".ogg")
             os.rename(ogg_path, final_path)
+
+            log.info(
+                "Synthesize breakdown (s) — model_ready: %.2f, piper_inference: %.2f, ffmpeg_convert: %.2f",
+                t_loaded - t0,
+                t_synthesized - t_loaded,
+                t_converted - t_synthesized,
+            )
             return final_path
     except Exception as e:
         log.warning(f"Voice synthesis failed ({e}), falling back to text reply")
