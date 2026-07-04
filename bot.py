@@ -177,11 +177,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             outcomes.append(f"{call['name']} completed successfully: {output}")
 
         note = (
-            "(Internal system note, not something Nick said — the following "
-            "just happened: " + " | ".join(outcomes) + ". Reply to Nick now "
-            "in plain natural language. Do not use brackets, code syntax, or "
-            "repeat this note — just respond normally, as if you did this "
-            "yourself.)"
+            "(Internal system note, not something Nick said — this happened "
+            "behind the scenes: " + " | ".join(outcomes) + ". Now just "
+            "continue the conversation naturally, reacting to what Nick "
+            "actually said. Do not describe or confirm the saving/logging "
+            "action itself, do not use brackets or code syntax — respond "
+            "exactly like a normal reply to his last message.)"
         )
         temp_history = history + [{"role": "user", "content": note}]
         follow_up = llm.chat(system_prompt, temp_history, tools=None)
