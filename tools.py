@@ -98,6 +98,34 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_fact",
+            "description": (
+                "Remember a personal, non-project fact about Nick — preferences, "
+                "how he likes to be talked to, running jokes, things he's told you "
+                "about himself. Use a short descriptive key, e.g. 'football_team', "
+                "'preferred_tone', 'coffee_order'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Short label for this fact"},
+                    "value": {"type": "string", "description": "The fact itself"},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_known_facts",
+            "description": "Get everything currently remembered about Nick personally (not project data).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -140,5 +168,13 @@ def execute_tool(name: str, arguments: str) -> str:
     if name == "set_project_status":
         ok = db.set_project_status(args["project_name"], args["status"])
         return json.dumps({"ok": ok})
+
+    if name == "remember_fact":
+        db.remember(args["key"], args["value"])
+        return json.dumps({"ok": True})
+
+    if name == "get_known_facts":
+        facts = db.all_memories()
+        return json.dumps({r["key"]: r["value"] for r in facts})
 
     return json.dumps({"ok": False, "error": f"unknown tool: {name}"})

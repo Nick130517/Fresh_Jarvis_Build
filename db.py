@@ -215,6 +215,22 @@ def recall(key: str) -> str | None:
     return row["value"] if row else None
 
 
+def all_memories() -> list[sqlite3.Row]:
+    """Every personal fact remembered, most recent per key. Used so Jarvis can
+    browse everything it knows about Nick rather than needing an exact key
+    match, which doesn't work well for natural conversation."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT key, value, created_at FROM memory m1
+            WHERE created_at = (
+                SELECT MAX(created_at) FROM memory m2 WHERE m2.key = m1.key
+            )
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+
 if __name__ == "__main__":
     init_db()
     print(f"Database initialised at {DB_PATH}")
